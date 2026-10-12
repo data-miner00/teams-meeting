@@ -1,0 +1,90 @@
+# Réunion Teams – Cellule de crise incident P1
+# INC-48217 – Portail client indisponible (erreurs 502 / lenteurs)
+# Lundi 12 octobre 2026, 9h15 (heure de Paris) – durée ~10 minutes
+#
+# Participants :
+#   Claire Moreau    – Incident Manager (animatrice)
+#   Julien Lefèvre   – Ingénieur infrastructure & bases de données
+#   Sophie Garnier   – Responsable applicative, Portail client
+#   Thomas Mercier   – Ingénieur réseau & sécurité
+#   Marc Dewilde     – Responsable Service Desk (Bruxelles)
+#
+# Format : "Prénom: réplique". Les lignes entre crochets sont des indications
+# ([pause 2] = silence de 2 secondes). Les lignes commençant par # sont ignorées.
+
+Claire: Bonjour à tous. Euh… je vois qu'on est presque au complet. Julien, tu es là ?
+Julien: Oui, oui, je suis là. Désolé, j'étais sur une autre fenêtre.
+Claire: Pas de souci. Thomas ?
+Thomas: Présent. Je vous entends bien ?
+Claire: Oui, c'est bon. Et Marc, depuis Bruxelles ?
+Marc: Oui, bonjour tout le monde. Je suis là, avec un œil sur la file des tickets.
+Claire: Parfait. Et Sophie… Sophie, je crois que tu es en mute.
+[pause 1.5]
+Sophie: Pardon, pardon. Voilà, c'est mieux ?
+Claire: Oui, on t'entend. Bon, merci à tous d'avoir rejoint aussi vite. Je rappelle le contexte rapidement. On a ouvert l'incident INC quatre-huit-deux-un-sept, priorité un, à huit heures quarante-deux. Le portail client renvoie des erreurs 502 de façon intermittente, et quand la page s'affiche, elle est très lente. L'objectif de cet appel, c'est de comprendre l'impact, d'identifier la cause probable, et de décider d'une action dans le quart d'heure. Marc, tu peux commencer par l'impact côté utilisateurs ?
+Marc: Oui. Alors, depuis huit heures trente à peu près, on a reçu… attends, je regarde… cent trente-sept tickets. Et ça continue de monter. La plupart, ce sont des clients qui n'arrivent pas à se connecter, ou qui restent bloqués sur la page de paiement. On a aussi quelques appels d'agences qui disent que leurs conseillers n'ont plus accès à la fiche client.
+Claire: D'accord. Donc ça touche aussi les usages internes, pas seulement les clients finaux.
+Marc: Exactement. Et j'ai deux gros comptes entreprise qui ont escaladé directement auprès de leur commercial.
+Claire: Ok, je note. Sophie, côté application, qu'est-ce que tu vois ?
+Sophie: Alors, côté appli, on voit dans les logs beaucoup de timeouts vers la base de données. Les requêtes partent, mais elles attendent une connexion qui ne vient pas. Le pool de connexions est saturé sur les quatre instances. Et quand le pool est plein, le load balancer finit par couper au bout de trente secondes, d'où les 502.
+Claire: Est-ce qu'il y a eu un changement récemment ?
+Sophie: Oui… et c'est là que ça devient intéressant. On a déployé la version quatre point douze samedi soir. Dans cette version, il y a une nouvelle fonctionnalité d'historique des commandes, et… euh… on a aussi modifié la configuration du pool. On est passé de cinquante connexions maximum à cent par instance.
+Julien: Cent par instance ? Sur quatre instances, ça fait quatre cents connexions.
+Sophie: Oui, c'est ça.
+Julien: Ah. Bon, ben je pense qu'on tient une piste. La base est configurée pour accepter trois cents connexions au total. Et il y a aussi les batchs et le reporting qui se connectent dessus.
+Claire: Attends, Julien, tu peux préciser ? Ce que tu vois côté base, concrètement ?
+Julien: Oui. Depuis huit heures vingt-cinq, on est au plafond, à trois cents connexions actives en permanence. Le CPU de la base est à quatre-vingt-quinze pour cent. Et il y a une requête qui revient énormément, une requête sur la table des commandes, sans index sur la date. Elle prend entre huit et douze secondes à chaque exécution.
+Sophie: Ça, c'est très probablement la nouvelle page d'historique. Elle se charge automatiquement sur la page d'accueil, juste après la connexion.
+Claire: D'accord. Donc si je résume : la nouvelle version ouvre plus de connexions, et en plus elle lance une requête lente à chaque connexion d'un client. Et ce matin, avec le pic du lundi, ça sature.
+Julien: C'est ça. Ce weekend, il n'y avait pas assez de trafic pour que ça se voie.
+Claire: Thomas, de ton côté, on peut exclure le réseau ? Je veux être sûre qu'on ne passe pas à côté de quelque chose.
+Thomas: Oui, alors j'ai vérifié. Les load balancers sont sains, les certificats sont valides, pas d'alerte sur le pare-feu. On n'observe pas d'attaque ni de pic de trafic anormal, c'est juste le trafic habituel d'un lundi matin. Le seul truc que je vois, ce sont les health checks qui échouent par intermittence sur les instances applicatives. Mais ça, c'est une conséquence, pas la cause.
+Claire: Très bien, merci. Donc on écarte la piste réseau et sécurité.
+Thomas: Oui. Par contre, petite remarque : comme les health checks échouent, le load balancer sort les instances une par une, puis les remet. Ça amplifie un peu l'effet yo-yo que voient les clients.
+Claire: Ok, c'est noté. Bon. Les options maintenant. Sophie, est-ce qu'on peut faire un rollback vers la quatre point onze ?
+Sophie: Techniquement oui. Le package est toujours disponible, et il n'y a pas eu de migration de schéma de base dans la quatre point douze. Donc le retour arrière est propre. Il faut compter… euh… vingt à vingt-cinq minutes, en déployant instance par instance.
+Julien: Moi, je proposerais une alternative, ou plutôt un complément. Je peux créer l'index sur la date de commande. Sur une table de cette taille, en mode en ligne, ça prend une dizaine de minutes, sans bloquer les écritures.
+Claire: D'accord. Et ça suffirait, à lui seul ?
+Julien: Honnêtement… non. Ça réduirait la durée de la requête, mais le problème du pool resterait. Quatre cents connexions pour trois cents disponibles, ça ne passe pas.
+Sophie: Et on ne peut pas juste changer la taille du pool à chaud ? Il faut redémarrer les instances de toute façon.
+Thomas: Et si on redémarre sans changer le code, la page d'historique continue de taper sur la base.
+Claire: Ok. Donc je propose la chose suivante, dites-moi si vous n'êtes pas d'accord. Un : on fait le rollback vers la quatre point onze, tout de suite. Deux : Julien, tu prépares la création de l'index, mais tu ne la lances qu'après le rollback, pour ne pas charger encore plus la base pendant le déploiement. Ça vous va ?
+Julien: Oui, c'est raisonnable. Je préfère aussi ne pas la lancer pendant le pic.
+Sophie: D'accord pour moi. Je lance le rollback dès qu'on raccroche… enfin, non, je peux le lancer maintenant, je reste sur l'appel en parallèle.
+Claire: Parfait, vas-y. Tu as besoin d'une validation du change manager ?
+Sophie: Normalement oui, pour un rollback en production.
+Claire: Je m'en occupe. Je l'appelle juste après, et je mets la trace dans le ticket. Considère que c'est validé en urgence. Thomas, pendant le rollback, est-ce que tu peux rendre les health checks un peu plus tolérants ? Pour éviter que les instances fassent le yo-yo.
+Thomas: Oui, je peux passer le délai de trois à dix secondes, temporairement. Je remets la valeur normale ce soir.
+Claire: Super. Pense à le noter dans le ticket aussi, pour qu'on n'oublie pas de revenir en arrière.
+Thomas: Bien sûr.
+Claire: Marc, maintenant, la communication. Qu'est-ce que tu as déjà envoyé ?
+Marc: Pour l'instant, on a juste mis un bandeau sur la page de statut : « Perturbations en cours sur l'espace client ». Et les agents du Service Desk répondent avec un message d'attente.
+Claire: D'accord. Est-ce qu'on peut mettre à jour le bandeau avec une estimation ? Disons, retour à la normale prévu vers dix heures ?
+Marc: Euh… je préfère dire « en cours de résolution, prochaine mise à jour à dix heures », plutôt que de promettre un retour à la normale. Si ça glisse, on aura encore plus d'appels.
+Claire: Tu as raison, c'est plus prudent. On fait comme ça. Et pour les deux comptes entreprise ?
+Marc: Je vais prévenir leurs commerciaux, avec un message un peu plus détaillé. Je peux leur dire qu'on a identifié la cause ?
+Claire: Oui, tu peux dire qu'on a identifié un problème lié à une mise à jour récente, et qu'un retour à la version précédente est en cours. Sans entrer dans le détail technique.
+Marc: Parfait, c'est clair.
+Sophie: Petite info : le rollback est lancé. La première instance est déjà en cours de redéploiement.
+Claire: Top, merci Sophie. Julien, tu surveilles le nombre de connexions sur la base pendant le déploiement ?
+Julien: Oui, j'ai le tableau de bord ouvert. Je vous dis dès que ça redescend.
+[pause 2.5]
+Julien: D'ailleurs… ça commence déjà. On est passé de trois cents à deux cent soixante. C'est la première instance qui a relâché ses connexions.
+Claire: C'est bon signe. Bon, en attendant, je voudrais qu'on parle de la suite, pour ne pas reproduire ça. Sophie, la quatre point douze, elle a été testée en charge ?
+Sophie: Pas vraiment, non. Les tests de performance ont été faits sur la préproduction, mais avec un jeu de données beaucoup plus petit. La table des commandes y fait à peu près un pour cent de la taille de la production. Donc la requête passait en quelques millisecondes.
+Julien: Et la préprod n'a qu'une seule instance. Le problème du pool ne pouvait pas apparaître.
+Claire: D'accord. Ça, c'est un vrai point pour le post-mortem. Thomas, un autre point de ton côté ?
+Thomas: Oui, peut-être une chose. On n'a eu aucune alerte avant huit heures quarante, alors que la base était saturée dès huit heures vingt-cinq. Ça veut dire qu'on a perdu un quart d'heure. Il faudrait une alerte sur le nombre de connexions, par exemple à quatre-vingts pour cent du maximum.
+Julien: Je suis d'accord. Je peux l'ajouter cette semaine dans la supervision.
+Claire: Très bien. Je récapitule les actions. Sophie : terminer le rollback et confirmer quand les quatre instances sont en quatre point onze. Julien : surveiller la base, puis créer l'index après le rollback, et ajouter l'alerte sur les connexions. Thomas : assouplir les health checks, et les remettre en place ce soir. Marc : mettre à jour la page de statut et prévenir les deux comptes entreprise. Et moi : validation du change en urgence, puis mail de synthèse au management à dix heures. On est d'accord ?
+Sophie: Oui.
+Julien: Ça marche.
+Thomas: C'est bon pour moi.
+Marc: Oui, d'accord.
+Claire: Et je vais planifier le post-mortem pour jeudi après-midi, une heure. Sophie, tu pourras présenter la chronologie côté application ?
+Sophie: Oui, pas de problème. Je prépare ça avec l'équipe de développement.
+Claire: Parfait. On se retrouve sur ce même lien à dix heures pour le point de situation. Si quelque chose bouge d'ici là, vous écrivez directement dans le canal de l'incident. Merci à tous, bon courage.
+Marc: Merci Claire. À tout à l'heure.
+Julien: Merci, à toute.
+Thomas: Merci, ciao.
+Sophie: Merci, à plus tard.
