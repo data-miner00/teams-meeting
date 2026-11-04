@@ -1,0 +1,9 @@
+[project]
+name = "teams-meeting"
+version = "0.1.0"
+description = "Le simulation d'une réunion Teams"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "edge-tts>=7.3.1",
+]
