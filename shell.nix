@@ -9,6 +9,11 @@
 
 let
   projectName = "teams-meeting";
+  activateVenv = ''
+    if [ -f .venv/bin/activate ]; then
+      source .venv/bin/activate
+    fi
+  '';
 in
 pkgs.mkShellNoCC {
   name = "${projectName}-dev";
@@ -18,6 +23,7 @@ pkgs.mkShellNoCC {
   ];
 
   shellHook = ''
+    ${activateVenv}
     echo "Nix environment for ${projectName} is ready! (uv $(uv --version))"
   '';
 }
